@@ -33,7 +33,84 @@ class ParsedDate(BaseModel):
     date: str  # YYYY-MM-DD format
 
 
+def _redact_pii_with_model_armor(text: str, template_name: str) -> str | None:
+    try:
+        import google.auth
+        import google.auth.transport.requests
+        import requests
+
+        credentials, _ = google.auth.default()
+
+        auth_req = google.auth.transport.requests.Request()
+        credentials.refresh(auth_req)
+
+        url = f"https://modelarmor.googleapis.com/v1/{template_name}:sanitizeUserPrompt"
+
+        headers = {
+            "Authorization": f"Bearer {credentials.token}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {"userPromptData": {"text": text}}
+
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        res_data = response.json()
+        sanitization_result = res_data.get("sanitizationResult", {})
+
+        sanitized_text = sanitization_result.get("sanitizedText")
+        if sanitized_text:
+            return sanitized_text
+
+    except Exception as e:
+        import logging
+
+        logging.warning(
+            f"Model Armor PII redaction failed: {e}. Falling back to local regex redaction."
+        )
+
+    return None
+
+
+def redact_pii(text: str) -> str:
+    """Redacts common Personally Identifiable Information (PII) like emails, phone numbers, and IP addresses from text.
+
+    Args:
+        text: The string content to check and redact.
+
+    Returns:
+        The redacted string.
+    """
+    if not text:
+        return text
+
+    # Try Model Armor first if configured in the environment
+    template_name = os.environ.get("MODEL_ARMOR_PROMPT_TEMPLATE") or os.environ.get(
+        "MODEL_ARMOR_RESPONSE_TEMPLATE"
+    )
+    if template_name:
+        sanitized = _redact_pii_with_model_armor(text, template_name)
+        if sanitized:
+            return sanitized
+
+    # Redact Emails
+    email_pattern = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"
+    text = re.sub(email_pattern, "[EMAIL]", text)
+
+    # Redact Phone numbers (handles typical formats like +1-555-123-4567, (555) 123-4567, 555-123-4567, etc.)
+    phone_pattern = r"\+?\b(?:\d{1,3}[-. (]*)?\(?\d{3}\)?[-. )]*\d{3}[-. ]*\d{4}\b"
+    text = re.sub(phone_pattern, "[PHONE]", text)
+
+    # Redact IP addresses
+    ip_pattern = r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"
+    text = re.sub(ip_pattern, "[IP_ADDRESS]", text)
+
+    return text
+
+
 def _parse_relative_date_pure_python(date_string: str) -> str | None:
+
     # Normalize string
     s = date_string.lower().strip()
     s = re.sub(r"[^\w\s-]", "", s)  # Remove punctuation except hyphen
@@ -87,7 +164,7 @@ def _parse_relative_date_pure_python(date_string: str) -> str | None:
     return None
 
 
-def parse_natural_language_date(input_data: ParseDateInput) -> str:
+async def parse_natural_language_date(input_data: ParseDateInput) -> str:
     """Parses a natural language date expression (e.g. 'yesterday', 'last Tuesday') into YYYY-MM-DD format.
 
     Args:
@@ -121,7 +198,7 @@ def parse_natural_language_date(input_data: ParseDateInput) -> str:
         CRITICAL RULE: Since this is for logging past achievements, all date references must resolve to PAST dates relative to today. When resolving weekday names (e.g., "Tuesday"), always resolve to the most recent past occurrence of that weekday (e.g., if today is Thursday Aug 13, "Tuesday" is Aug 11, NOT Aug 18).
         """
 
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -175,7 +252,7 @@ def _get_firestore_collection() -> str:
     return f"{project_id}-firestore-collection"
 
 
-def write_daily_entry(
+async def write_daily_entry(
     user_id: str, date: str, text: str, label: str = "daily", ctx: Context | None = None
 ) -> str:
     """Writes a daily accomplishment entry to the Firestore database.
@@ -190,7 +267,7 @@ def write_daily_entry(
     Returns:
         A confirmation message.
     """
-    db = firestore.Client()
+    db = firestore.AsyncClient()
     collection_name = _get_firestore_collection()
     doc_ref = (
         db.collection(collection_name)
@@ -198,21 +275,22 @@ def write_daily_entry(
         .collection("accomplishments")
         .document(date)
     )
-    doc_ref.set(
+    await doc_ref.set(
         {
             "date": date,
-            "text": text,
+            "text": redact_pii(text),
             "label": label,
             "timestamp": firestore.SERVER_TIMESTAMP,
         }
     )
+
     if ctx:
         ctx.state["daily_saved"] = True
     return f"Successfully saved to accomplishments for {date}."
 
 
-def fetch_daily_accomplishments_by_range(
-    input_data: FetchAccomplishmentsInput, ctx: Context | None = None
+async def fetch_daily_accomplishments_by_range(
+    input_data: FetchAccomplishmentsInput, ctx: Context
 ) -> list[dict] | str:
     """Reads all daily accomplishment entries for the current user in a given date range (inclusive).
 
@@ -249,7 +327,7 @@ def fetch_daily_accomplishments_by_range(
         )
 
     try:
-        db = firestore.Client()
+        db = firestore.AsyncClient()
         collection_name = _get_firestore_collection()
         docs = (
             db.collection(collection_name)
@@ -259,7 +337,7 @@ def fetch_daily_accomplishments_by_range(
         )
 
         results = []
-        for d in docs:
+        async for d in docs:
             data = d.to_dict()
             doc_date = data.get("date")
             if doc_date and start_date <= doc_date <= end_date:
@@ -288,7 +366,7 @@ def fetch_daily_accomplishments_by_range(
         )
 
 
-def write_weekly_entry(
+async def write_weekly_entry(
     user_id: str, date: str, text: str, label: str = "weekly"
 ) -> str:
     """Writes the weekly accomplishment summary to the Firestore database under the Monday date.
@@ -302,7 +380,7 @@ def write_weekly_entry(
     Returns:
         A confirmation message.
     """
-    db = firestore.Client()
+    db = firestore.AsyncClient()
     collection_name = _get_firestore_collection()
     doc_ref = (
         db.collection(collection_name)
@@ -310,18 +388,19 @@ def write_weekly_entry(
         .collection("accomplishments")
         .document(date)
     )
-    doc_ref.set(
+    await doc_ref.set(
         {
             "date": date,
-            "text": text,
+            "text": redact_pii(text),
             "label": label,
             "timestamp": firestore.SERVER_TIMESTAMP,
         }
     )
+
     return f"Successfully saved weekly summary to Firestore under {date}."
 
 
-def write_summary_to_gcs(user_id: str, week_id: str, content: str) -> str:
+async def write_summary_to_gcs(user_id: str, week_id: str, content: str) -> str:
     """Writes the finalized weekly summary markdown content to a GCS bucket.
 
     Args:
@@ -332,15 +411,20 @@ def write_summary_to_gcs(user_id: str, week_id: str, content: str) -> str:
     Returns:
         The GCS URI of the written file.
     """
-    client = storage.Client()
-    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or client.project
-    bucket_name = f"{project_id}-bucket"
+    import asyncio
 
-    bucket = client.bucket(bucket_name)
-    if not bucket.exists():
-        bucket = client.create_bucket(bucket_name)
+    def _upload():
+        client = storage.Client()
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or client.project
+        bucket_name = f"{project_id}-bucket"
 
-    blob_path = f"users/{user_id}/weekly-summary-{week_id}.md"
-    blob = bucket.blob(blob_path)
-    blob.upload_from_string(content, content_type="text/markdown")
-    return f"gs://{bucket_name}/{blob_path}"
+        bucket = client.bucket(bucket_name)
+        if not bucket.exists():
+            bucket = client.create_bucket(bucket_name)
+
+        blob_path = f"users/{user_id}/weekly-summary-{week_id}.md"
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(redact_pii(content), content_type="text/markdown")
+        return f"gs://{bucket_name}/{blob_path}"
+
+    return await asyncio.to_thread(_upload)

@@ -13,13 +13,33 @@
 # limitations under the License.
 
 from datetime import datetime
+from unittest.mock import patch
 
+import pytest
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from app.agent import root_agent
+
+
+@pytest.fixture(autouse=True)
+def mock_datetime_now():
+    print("FIXTURE MODULE NAME IS:", __name__)
+    mock_now = datetime(2026, 8, 12, 15, 0, 0)
+
+    class MockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return mock_now
+
+    with (
+        patch("app.agent.datetime", MockDatetime),
+        patch("app.tools.datetime", MockDatetime),
+        patch(f"{__name__}.datetime", MockDatetime),
+    ):
+        yield
 
 
 def test_daily_vague_accomplishment_clarification() -> None:

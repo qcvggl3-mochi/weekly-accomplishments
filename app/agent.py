@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import logging
 import os
 from datetime import datetime
 
@@ -35,6 +36,8 @@ from pydantic import BaseModel, Field
 from app import tools
 
 load_dotenv()
+
+logger = logging.getLogger("weekly-accomplishments.agent")
 
 
 # Pydantic input schemas to validate daily logging tool arguments
@@ -157,15 +160,47 @@ def orchestrator_node(node_input: str, ctx: Context) -> Event:
                     ctx.state["active_flow"] = "daily"
                     break
 
+    session_id = ctx.session.id if hasattr(ctx, "session") and ctx.session else None
+
     if active_flow == "weekly":
+        logger.info(
+            "Resuming active session flow",
+            extra={
+                "intent": "weekly_summary",
+                "user_id": ctx.user_id,
+                "session_id": session_id,
+                "message_length": len(user_message),
+                "flow_status": "active_session_flow",
+            },
+        )
         return Event(route="ROUTE_WEEKLY", output=user_message)
     elif active_flow == "daily":
+        logger.info(
+            "Resuming active session flow",
+            extra={
+                "intent": "daily_log",
+                "user_id": ctx.user_id,
+                "session_id": session_id,
+                "message_length": len(user_message),
+                "flow_status": "active_session_flow",
+            },
+        )
         return Event(route="ROUTE_DAILY", output=user_message)
 
     # If it is a cron trigger or first empty prompt
     if not user_message or user_message.lower() in ["/start", "start", "trigger"]:
         # Set default active flow
         ctx.state["active_flow"] = "daily"
+        logger.info(
+            "Triggered orchestrator prompt",
+            extra={
+                "intent": "daily_log",
+                "user_id": ctx.user_id,
+                "session_id": session_id,
+                "message_length": len(user_message) if user_message else 0,
+                "flow_status": "cron_or_start_trigger",
+            },
+        )
         return Event(route="PROMPT_DAILY")
 
     # Use LLM to classify user intent
@@ -193,6 +228,17 @@ def orchestrator_node(node_input: str, ctx: Context) -> Event:
         intent = res_data.get("intent", "daily_log")
     except Exception:
         intent = "daily_log"
+
+    logger.info(
+        "Classified user intent",
+        extra={
+            "intent": intent,
+            "user_id": ctx.user_id,
+            "session_id": session_id,
+            "message_length": len(user_message),
+            "flow_status": "new_intent_detected",
+        },
+    )
 
     if intent == "weekly_summary":
         ctx.state["active_flow"] = "weekly"
@@ -299,7 +345,7 @@ def save_daily_accomplishments_draft(
     return "Draft accomplishments saved to state."
 
 
-def approve_and_save_daily_accomplishments(
+async def approve_and_save_daily_accomplishments(
     input_data: ApproveAndSaveDailyAccomplishmentsInput, ctx: Context
 ) -> str:
     """Writes the approved daily accomplishments to Firestore and resets the active daily logging state.
@@ -329,12 +375,35 @@ def approve_and_save_daily_accomplishments(
         )
 
     try:
-        firestore_msg = tools.write_daily_entry(ctx.user_id, date, text)
+        firestore_msg = await tools.write_daily_entry(ctx.user_id, date, text)
         ctx.state["daily_saved"] = True
         ctx.state["target_daily_date"] = ""
         ctx.state["daily_draft"] = ""
+        session_id = ctx.session.id if hasattr(ctx, "session") and ctx.session else None
+        logger.info(
+            "Saved daily accomplishments",
+            extra={
+                "outcome": "success",
+                "action": "save_daily",
+                "user_id": ctx.user_id,
+                "session_id": session_id,
+                "date": date,
+            },
+        )
         return f"Daily entry approved. Firestore: {firestore_msg}"
     except Exception as e:
+        session_id = ctx.session.id if hasattr(ctx, "session") and ctx.session else None
+        logger.error(
+            "Failed to save daily accomplishments",
+            extra={
+                "outcome": "failure",
+                "action": "save_daily",
+                "user_id": ctx.user_id,
+                "session_id": session_id,
+                "date": date,
+                "error": str(e),
+            },
+        )
         return (
             f"Error: Failed to save approved daily accomplishments to database. Detail: {e!s}. "
             "Recovery Instruction: Check database status. The user can be notified of a save failure."
@@ -678,7 +747,7 @@ def hitl_approval_node(node_input, ctx: Context):
     )
 
 
-def archive_weekly_summary(node_input, ctx: Context) -> Event:
+async def archive_weekly_summary(node_input, ctx: Context) -> Event:
     """Writes the approved weekly summary to GCS and Firestore, then clears session state."""
     if os.environ.get("IS_EVAL_RUN") == "true":
         return Event(
@@ -694,15 +763,41 @@ def archive_weekly_summary(node_input, ctx: Context) -> Event:
         )
     summary = ctx.state.get("weekly_summary", "")
     monday_date = ctx.state.get("monday_date", "")
-
-    # Format a week ID (e.g., 2026-W33 or simply the Monday date)
     week_id = monday_date
+    session_id = ctx.session.id if hasattr(ctx, "session") and ctx.session else None
+    try:
+        # Save to GCS
+        gcs_uri = await tools.write_summary_to_gcs(ctx.user_id, week_id, summary)
 
-    # Save to GCS
-    gcs_uri = tools.write_summary_to_gcs(ctx.user_id, week_id, summary)
+        # Save to Firestore
+        firestore_msg = await tools.write_weekly_entry(
+            ctx.user_id, monday_date, summary
+        )
 
-    # Save to Firestore
-    firestore_msg = tools.write_weekly_entry(ctx.user_id, monday_date, summary)
+        logger.info(
+            "Archived weekly summary successfully",
+            extra={
+                "outcome": "success",
+                "action": "archive_weekly",
+                "user_id": ctx.user_id,
+                "session_id": session_id,
+                "monday_date": monday_date,
+                "gcs_uri": gcs_uri,
+            },
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to archive weekly summary",
+            extra={
+                "outcome": "failure",
+                "action": "archive_weekly",
+                "user_id": ctx.user_id,
+                "session_id": session_id,
+                "monday_date": monday_date,
+                "error": str(e),
+            },
+        )
+        raise e
 
     # Clear active state
     ctx.state["approved"] = False
