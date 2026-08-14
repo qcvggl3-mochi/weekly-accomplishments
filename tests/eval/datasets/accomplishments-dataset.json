@@ -1,0 +1,96 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "daily_vague_clarification",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "today I fixed bugs and wrote code"}]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [{"text": "Which component or feature did you fix bugs and write code for?"}]
+        }
+      }
+    },
+    {
+      "eval_case_id": "daily_specific_no_clarification",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "I fixed a bug in the query renderer that prevented rendering the results."}]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [{"text": "Here is your draft daily log for 2026-08-13:\n* Fixed a bug in the query renderer that prevented rendering the results.\n\nDoes this look good?"}]
+        }
+      }
+    },
+    {
+      "eval_case_id": "daily_cumulative_edit",
+      "agent_data": {
+        "turns": [
+          {
+            "turn_index": 0,
+            "events": [
+              {
+                "author": "user",
+                "content": {"role": "user", "parts": [{"text": "today I worked on the query renderer bug"}]}
+              },
+              {
+                "author": "agent",
+                "content": {
+                  "role": "model",
+                  "parts": [{"text": "Here is the draft for 2026-08-13:\n* Worked on the query renderer bug\n\nDoes this look good?"}]
+                }
+              },
+              {
+                "author": "user",
+                "content": {"role": "user", "parts": [{"text": "also did code reviews for team sync"}]}
+              }
+            ]
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [{"text": "Here is the updated draft for 2026-08-13:\n* Worked on the query renderer bug\n* Did code reviews for team sync\n\nDoes this look good?"}]
+        }
+      }
+    },
+    {
+      "eval_case_id": "weekly_query_optimization",
+      "agent_data": {
+        "turns": [
+          {
+            "turn_index": 0,
+            "events": [
+              {
+                "author": "user",
+                "content": {"role": "user", "parts": [{"text": "what did I do this week?"}]}
+              },
+              {
+                "author": "agent",
+                "content": {
+                  "role": "model",
+                  "parts": [{"text": "Week [August 10th to August 16th]\n* Attended weekly sync\n* Fixed rendering issue\n\nDoes this look like a good summary?"}]
+                }
+              },
+              {
+                "author": "user",
+                "content": {"role": "user", "parts": [{"text": "yes"}]}
+              }
+            ]
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [{"text": "Weekly accomplishments summary approved."}]
+        }
+      }
+    }
+  ]
+}
